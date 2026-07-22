@@ -6,26 +6,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/common/yaml"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
+	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	"github.com/metacubex/mihomo/component/iface/anet"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/log"
 
+	"github.com/metacubex/http"
 	"github.com/metacubex/tailscale/envknob"
 	"github.com/metacubex/tailscale/hostinfo"
 	"github.com/metacubex/tailscale/ipn"
 	"github.com/metacubex/tailscale/net/netmon"
 	"github.com/metacubex/tailscale/tailcfg"
 	"github.com/metacubex/tailscale/tsnet"
+	"github.com/metacubex/tailscale/wgengine/magicsock"
 	D "github.com/miekg/dns"
 	"github.com/samber/lo"
 )
@@ -59,9 +67,11 @@ type TailscaleOption struct {
 	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
 	UDP        bool   `proxy:"udp,omitempty"`
 
-	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
-	ExitNode               string `proxy:"exit-node,omitempty"`
-	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+	AcceptRoutes           *bool    `proxy:"accept-routes,omitempty"`
+	ExitNode               string   `proxy:"exit-node,omitempty"`
+	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
+	ConnectionOrder        string   `proxy:"connection-order,omitempty"`
+	RelayPreferences       []string `proxy:"relay-preferences,omitempty"`
 }
 
 func init() {
@@ -119,6 +129,10 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	if !C.Path.IsSafePath(option.StateDir) {
 		return nil, C.Path.ErrNotSafePath(option.StateDir)
 	}
+	connectionOrder, err := loadTailscaleConnectionOrder(option)
+	if err != nil {
+		return nil, err
+	}
 
 	addr := option.ControlURL
 	if addr == "" {
@@ -143,11 +157,12 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	outbound.server = &tsnet.Server{
-		Dir:        option.StateDir,
-		Hostname:   option.Hostname,
-		AuthKey:    option.AuthKey,
-		ControlURL: option.ControlURL,
-		Ephemeral:  option.Ephemeral,
+		Dir:             option.StateDir,
+		Hostname:        option.Hostname,
+		AuthKey:         option.AuthKey,
+		ControlURL:      option.ControlURL,
+		Ephemeral:       option.Ephemeral,
+		ConnectionOrder: connectionOrder,
 		SystemDialer: func(ctx context.Context, network, address string) (net.Conn, error) {
 			log.Debugln("[Tailscale](%s) SystemDialer: start dial %s %s", option.Name, network, address)
 			conn, err := outbound.dialer.DialContext(ctx, network, address)
@@ -178,6 +193,138 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
 	return outbound, nil
+}
+
+func loadTailscaleConnectionOrder(option TailscaleOption) ([]magicsock.ConnectionOrder, error) {
+	orders := make(map[netip.Addr][]string)
+	if option.ConnectionOrder != "" {
+		data, err := readTailscaleConnectionOrder(option.ConnectionOrder, option.DialerProxy)
+		if err != nil {
+			return nil, fmt.Errorf("read tailscale connection-order file: %w", err)
+		}
+		orders, err = parseTailscaleConnectionOrder(data, true)
+		if err != nil {
+			return nil, fmt.Errorf("parse tailscale connection-order file: %w", err)
+		}
+	}
+
+	// relay-preferences is retained for compatibility. A per-device entry in
+	// the new file wins when both configurations target the same exit node.
+	if len(option.RelayPreferences) != 0 {
+		exitNodeIP, err := netip.ParseAddr(option.ExitNode)
+		if err != nil {
+			return nil, fmt.Errorf("tailscale relay-preferences requires exit-node to be a Tailscale IP address: %w", err)
+		}
+		if _, exists := orders[exitNodeIP]; !exists {
+			paths := normalizeTailscaleConnectionOrder(option.RelayPreferences, false)
+			if len(paths) != 0 {
+				orders[exitNodeIP] = paths
+			}
+		}
+	}
+
+	targets := make([]netip.Addr, 0, len(orders))
+	for target := range orders {
+		targets = append(targets, target)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].Compare(targets[j]) < 0
+	})
+	result := make([]magicsock.ConnectionOrder, 0, len(targets))
+	for _, target := range targets {
+		result = append(result, magicsock.ConnectionOrder{
+			Target: target,
+			Paths:  orders[target],
+		})
+	}
+	return result, nil
+}
+
+const maxTailscaleConnectionOrderSize = 1 << 20
+
+func readTailscaleConnectionOrder(location string, proxy string) ([]byte, error) {
+	if strings.HasPrefix(strings.ToLower(location), "http://") ||
+		strings.HasPrefix(strings.ToLower(location), "https://") {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		response, err := mihomoHttp.HttpRequest(ctx, location, http.MethodGet, nil, nil, mihomoHttp.WithSpecialProxy(proxy))
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			return nil, fmt.Errorf("unexpected HTTP status: %s", response.Status)
+		}
+		data, err := io.ReadAll(io.LimitReader(response.Body, maxTailscaleConnectionOrderSize+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(data) > maxTailscaleConnectionOrderSize {
+			return nil, fmt.Errorf("connection-order file exceeds %d bytes", maxTailscaleConnectionOrderSize)
+		}
+		return data, nil
+	}
+
+	path := C.Path.Resolve(location)
+	if !C.Path.IsSafePath(path) {
+		return nil, C.Path.ErrNotSafePath(path)
+	}
+	return os.ReadFile(path)
+}
+
+func parseTailscaleConnectionOrder(data []byte, addDirectIfMissing bool) (map[netip.Addr][]string, error) {
+	var raw map[string][]string
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	orders := make(map[netip.Addr][]string, len(raw))
+	for targetString, rawPaths := range raw {
+		target, err := netip.ParseAddr(strings.TrimSpace(targetString))
+		if err != nil {
+			return nil, fmt.Errorf("invalid target %q: %w", targetString, err)
+		}
+		paths := normalizeTailscaleConnectionOrder(rawPaths, addDirectIfMissing)
+		if len(paths) != 0 {
+			orders[target] = paths
+		}
+	}
+	return orders, nil
+}
+
+func normalizeTailscaleConnectionOrder(rawPaths []string, addDirectIfMissing bool) []string {
+	paths := make([]string, 0, len(rawPaths)+1)
+	seen := make(map[string]struct{}, len(rawPaths)+1)
+	hasDirect := false
+	for _, rawPath := range rawPaths {
+		path := strings.TrimSpace(rawPath)
+		if path == "" {
+			continue
+		}
+		if strings.EqualFold(path, "AUTO") {
+			if len(rawPaths) == 1 {
+				return nil
+			}
+			continue
+		}
+		if strings.EqualFold(path, "DIRECT") {
+			path = "DIRECT"
+			hasDirect = true
+		} else if ip, err := netip.ParseAddr(path); err == nil {
+			path = ip.String()
+		} else {
+			path = strings.ToUpper(path)
+		}
+		key := strings.ToLower(path)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		paths = append(paths, path)
+	}
+	if addDirectIfMissing && len(paths) != 0 && !hasDirect {
+		paths = append([]string{"DIRECT"}, paths...)
+	}
+	return paths
 }
 
 func (t *Tailscale) start() error {

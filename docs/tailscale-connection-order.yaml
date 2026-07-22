@@ -1,0 +1,26 @@
+# Tailscale per-device connection order.
+#
+# Each key is the Tailscale IP of a device or exit node. Each value is an
+# ordered list containing:
+#   - DIRECT: direct UDP
+#   - a DERP region code, such as TYO
+#   - the Tailscale IP of an eligible peer relay
+#
+# Devices omitted from this file use automatic Tailscale path selection.
+# An empty list also means automatic selection.
+# If DIRECT is omitted from a non-empty list, it is implicitly inserted first.
+# The order controls peer data paths; DERP can still carry path-discovery
+# signaling needed to establish a direct connection.
+#
+# Reference this file from a Tailscale outbound with either a local path or URL:
+# connection-order: https://example.com/tailscale-connection-order.yaml
+
+# Direct only.
+100.88.65.23:
+  - DIRECT
+
+# Try DERP TYO, then the peer relay, then direct UDP.
+100.113.237.90:
+  - TYO
+  - 100.91.245.79
+  - DIRECT

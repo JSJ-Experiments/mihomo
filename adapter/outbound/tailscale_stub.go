@@ -18,9 +18,11 @@ type TailscaleOption struct {
 	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
 	UDP        bool   `proxy:"udp,omitempty"`
 
-	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
-	ExitNode               string `proxy:"exit-node,omitempty"`
-	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+	AcceptRoutes           *bool    `proxy:"accept-routes,omitempty"`
+	ExitNode               string   `proxy:"exit-node,omitempty"`
+	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
+	ConnectionOrder        string   `proxy:"connection-order,omitempty"`
+	RelayPreferences       []string `proxy:"relay-preferences,omitempty"`
 }
 
 func NewTailscale(option TailscaleOption) (*Tailscale, error) {
