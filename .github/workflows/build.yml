@@ -21,25 +21,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-test-release:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            goamd64: v1
-            output: amd64
-            test: true
-          - goos: linux
-            goarch: arm64
-            output: arm64
-          - goos: android
-            goarch: arm64
-            output: arm64-v8
-            ndk: aarch64-linux-android34
-
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -62,26 +45,7 @@ jobs:
           echo "BUILDTIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
           echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
 
-      - name: Set up Android NDK
-        if: matrix.goos == 'android'
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r29-beta1
-
-      - name: Configure Android compiler
-        if: matrix.goos == 'android'
-        shell: bash
-        run: |
-          echo "CC=${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.ndk }}-clang" >> "$GITHUB_ENV"
-          echo "CGO_ENABLED=1" >> "$GITHUB_ENV"
-
-      - name: Configure static Linux build
-        if: matrix.goos == 'linux'
-        run: echo "CGO_ENABLED=0" >> "$GITHUB_ENV"
-
       - name: Test
-        if: matrix.test == true
         shell: bash
         run: |
           export SKIP_CONCURRENT_TEST=1
@@ -96,56 +60,40 @@ jobs:
           sudo update-ca-certificates
           cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
 
-      - name: Build
+      - name: Build Linux binaries
         shell: bash
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOAMD64: ${{ matrix.goamd64 }}
         run: |
-          ldflags="-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' -w -s -buildid="
-          if [ "${{ matrix.goos }}" = linux ]; then
-            ldflags="-extldflags --static ${ldflags}"
-          fi
-          output="mihomo-${{ matrix.goos }}-${{ matrix.output }}"
-          go build -v -tags with_gvisor -trimpath -ldflags "$ldflags" -o "$output" .
-          gzip -9 "$output"
+          mkdir -p dist
+          ldflags="-extldflags --static -X github.com/metacubex/mihomo/constant.Version=${VERSION} -X github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME} -w -s -buildid="
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 \
+            go build -v -tags with_gvisor -trimpath -ldflags "$ldflags" -o dist/mihomo-linux-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -v -tags with_gvisor -trimpath -ldflags "$ldflags" -o dist/mihomo-linux-arm64 .
+          gzip -9 dist/mihomo-linux-amd64 dist/mihomo-linux-arm64
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
         with:
-          name: mihomo-${{ matrix.goos }}-${{ matrix.output }}
-          path: mihomo-${{ matrix.goos }}-${{ matrix.output }}.gz
-          if-no-files-found: error
+          ndk-version: r29-beta1
 
-  release-alpha:
-    if: github.event_name != 'pull_request'
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download binaries
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+      - name: Build Android arm64-v8
+        shell: bash
+        run: |
+          ldflags="-X github.com/metacubex/mihomo/constant.Version=${VERSION} -X github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME} -w -s -buildid="
+          CC="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" \
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+            go build -v -tags with_gvisor -trimpath -ldflags "$ldflags" -o dist/mihomo-android-arm64-v8 .
+          gzip -9 dist/mihomo-android-arm64-v8
 
       - name: Generate release metadata
         shell: bash
         run: |
-          version="${{ inputs.version }}"
-          if [ -z "$version" ]; then
-            version="alpha-$(git rev-parse --short HEAD)"
-          fi
           commit="$(git rev-parse HEAD)"
           cd dist
           sha256sum mihomo-*.gz | sort -k2 > checksums.txt
-          printf '%s\n' "$version" > version.txt
-          VERSION="$version" COMMIT="$commit" python3 - <<'PY'
+          printf '%s\n' "$VERSION" > version.txt
+          VERSION="$VERSION" COMMIT="$commit" python3 - <<'PY'
           import glob, hashlib, json, os
 
           assets = {}
