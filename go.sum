@@ -1,3 +1,5 @@
+github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260724132156-54c85bb01c6b h1:9pgVxZyp5l44uaB5WaqwrYByQIMLYF2a9EOK3Wv7Eq4=
+github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260724132156-54c85bb01c6b/go.mod h1:rDpd7cy7itpPi3Kgb90fUgSnKwMXHYBk0R5DuNRiNNA=
 github.com/RyuaNerin/go-krypto v1.3.0 h1:smavTzSMAx8iuVlGb4pEwl9MD2qicqMzuXR2QWp2/Pg=
 github.com/RyuaNerin/go-krypto v1.3.0/go.mod h1:9R9TU936laAIqAmjcHo/LsaXYOZlymudOAxjaBf62UM=
 github.com/RyuaNerin/testingutil v0.1.0 h1:IYT6JL57RV3U2ml3dLHZsVtPOP6yNK7WUVdzzlpNrss=
@@ -177,8 +179,6 @@ github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141 h1:DK2l6m2Fc85H2Bhi
 github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141/go.mod h1:/yI4OiGOSn0SURhZdJF3CbtPg3nwK700bG8TZLMBvAg=
 github.com/metacubex/ssh v0.1.0 h1:iGfr99qk/eMHzUnQ/0bTxXT8+8SWqLSHBWDHoAhngzw=
 github.com/metacubex/ssh v0.1.0/go.mod h1:NUtl0d+/f2cG9ECEpMM8iCVOpmggQlC13oLeDUONDlU=
-github.com/metacubex/tailscale v0.0.0-20260724111156-9863bf253a7b h1:RUQdlRua7haiIuk1734R+QRcjaTo4Y53EzuCPqmMnUk=
-github.com/metacubex/tailscale v0.0.0-20260724111156-9863bf253a7b/go.mod h1:rDpd7cy7itpPi3Kgb90fUgSnKwMXHYBk0R5DuNRiNNA=
 github.com/metacubex/tailscale-wireguard-go v0.0.0-20260623093519-06ea214022e4 h1:ui12xOUPsCAYwzI7+7Hw2mVhrAbWDGNQZcrBiELhGk0=
 github.com/metacubex/tailscale-wireguard-go v0.0.0-20260623093519-06ea214022e4/go.mod h1:W00EeoPdd2jbV3+ZUa0m2b7FdKx5B1LFsXvEpy7cToQ=
 github.com/metacubex/tfo-go v0.0.0-20260623020846-376a77860b8c h1:+2C1UshSLzaogLY/IDz1XhOLxjhs3rkhVHB4eCN9Zto=

@@ -42,7 +42,7 @@ require (
 	github.com/metacubex/sing-wireguard v0.0.0-20260520151737-7e7c7c1b854c
 	github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141
 	github.com/metacubex/ssh v0.1.0
-	github.com/metacubex/tailscale v0.0.0-20260724111156-9863bf253a7b
+	github.com/metacubex/tailscale v0.0.0-20260724132156-54c85bb01c6b
 	github.com/metacubex/tfo-go v0.0.0-20260623020846-376a77860b8c
 	github.com/metacubex/tls v0.1.7
 	github.com/metacubex/utls v1.8.7
@@ -152,3 +152,5 @@ require (
 
 // for https://github.com/golang/protobuf/issues/1704
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
+
+replace github.com/metacubex/tailscale => github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260724132156-54c85bb01c6b
