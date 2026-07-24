@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -54,6 +55,10 @@ type Tailscale struct {
 
 	serverStarted bool
 
+	connectionOrderURL         string
+	connectionOrderCache       string
+	connectionOrderRefreshOnce sync.Once
+
 	unregisterDNSResolver func()
 }
 
@@ -71,6 +76,7 @@ type TailscaleOption struct {
 	ExitNode               string   `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
 	ConnectionOrder        string   `proxy:"connection-order,omitempty"`
+	ConnectionOrderCache   string   `proxy:"connection-order-cache,omitempty"`
 	RelayPreferences       []string `proxy:"relay-preferences,omitempty"`
 }
 
@@ -154,6 +160,9 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		ctx:           ctx,
 		cancel:        cancel,
 		backendInitCh: make(chan struct{}),
+
+		connectionOrderURL:   connectionOrder.URL,
+		connectionOrderCache: connectionOrder.CachePath,
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	outbound.server = &tsnet.Server{
@@ -162,7 +171,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		AuthKey:         option.AuthKey,
 		ControlURL:      option.ControlURL,
 		Ephemeral:       option.Ephemeral,
-		ConnectionOrder: connectionOrder,
+		ConnectionOrder: connectionOrder.Initial,
 		SystemDialer: func(ctx context.Context, network, address string) (net.Conn, error) {
 			log.Debugln("[Tailscale](%s) SystemDialer: start dial %s %s", option.Name, network, address)
 			conn, err := outbound.dialer.DialContext(ctx, network, address)
@@ -195,25 +204,64 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	return outbound, nil
 }
 
-func loadTailscaleConnectionOrder(option TailscaleOption) ([]magicsock.ConnectionOrder, error) {
+type tailscaleConnectionOrderConfig struct {
+	Initial   []magicsock.ConnectionOrder
+	URL       string
+	CachePath string
+}
+
+func loadTailscaleConnectionOrder(option TailscaleOption) (tailscaleConnectionOrderConfig, error) {
+	var config tailscaleConnectionOrderConfig
 	orders := make(map[netip.Addr][]string)
 	if option.ConnectionOrder != "" {
-		data, err := readTailscaleConnectionOrder(option.ConnectionOrder, option.DialerProxy)
-		if err != nil {
-			return nil, fmt.Errorf("read tailscale connection-order file: %w", err)
-		}
-		orders, err = parseTailscaleConnectionOrder(data, true)
-		if err != nil {
-			return nil, fmt.Errorf("parse tailscale connection-order file: %w", err)
+		if isTailscaleConnectionOrderURL(option.ConnectionOrder) {
+			config.URL = option.ConnectionOrder
+			config.CachePath = option.ConnectionOrderCache
+			if config.CachePath == "" {
+				config.CachePath = filepath.Join(option.StateDir, "connection-order.yaml")
+			} else {
+				config.CachePath = C.Path.Resolve(config.CachePath)
+			}
+			if !C.Path.IsSafePath(config.CachePath) {
+				return config, C.Path.ErrNotSafePath(config.CachePath)
+			}
+
+			data, err := os.ReadFile(config.CachePath)
+			if err == nil {
+				orders, err = parseTailscaleConnectionOrder(data, true)
+				if err != nil {
+					log.Warnln("[Tailscale](%s) ignoring invalid cached connection order %s: %v", option.Name, config.CachePath, err)
+					orders = make(map[netip.Addr][]string)
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				log.Warnln("[Tailscale](%s) cannot read cached connection order %s: %v", option.Name, config.CachePath, err)
+			}
+		} else {
+			data, err := readTailscaleConnectionOrder(option.ConnectionOrder, option.DialerProxy)
+			if err != nil {
+				return config, fmt.Errorf("read tailscale connection-order file: %w", err)
+			}
+			orders, err = parseTailscaleConnectionOrder(data, true)
+			if err != nil {
+				return config, fmt.Errorf("parse tailscale connection-order file: %w", err)
+			}
 		}
 	}
 
+	if err := mergeTailscaleRelayPreferences(orders, option); err != nil {
+		return config, err
+	}
+	config.Initial = tailscaleConnectionOrdersFromMap(orders)
+	return config, nil
+}
+
+func mergeTailscaleRelayPreferences(orders map[netip.Addr][]string, option TailscaleOption) error {
 	// relay-preferences is retained for compatibility. A per-device entry in
 	// the new file wins when both configurations target the same exit node.
 	if len(option.RelayPreferences) != 0 {
 		exitNodeIP, err := netip.ParseAddr(option.ExitNode)
 		if err != nil {
-			return nil, fmt.Errorf("tailscale relay-preferences requires exit-node to be a Tailscale IP address: %w", err)
+			return fmt.Errorf("tailscale relay-preferences requires exit-node to be a Tailscale IP address: %w", err)
 		}
 		if _, exists := orders[exitNodeIP]; !exists {
 			paths := normalizeTailscaleConnectionOrder(option.RelayPreferences, false)
@@ -222,7 +270,10 @@ func loadTailscaleConnectionOrder(option TailscaleOption) ([]magicsock.Connectio
 			}
 		}
 	}
+	return nil
+}
 
+func tailscaleConnectionOrdersFromMap(orders map[netip.Addr][]string) []magicsock.ConnectionOrder {
 	targets := make([]netip.Addr, 0, len(orders))
 	for target := range orders {
 		targets = append(targets, target)
@@ -237,14 +288,18 @@ func loadTailscaleConnectionOrder(option TailscaleOption) ([]magicsock.Connectio
 			Paths:  orders[target],
 		})
 	}
-	return result, nil
+	return result
 }
 
 const maxTailscaleConnectionOrderSize = 1 << 20
 
+func isTailscaleConnectionOrderURL(location string) bool {
+	return strings.HasPrefix(strings.ToLower(location), "http://") ||
+		strings.HasPrefix(strings.ToLower(location), "https://")
+}
+
 func readTailscaleConnectionOrder(location string, proxy string) ([]byte, error) {
-	if strings.HasPrefix(strings.ToLower(location), "http://") ||
-		strings.HasPrefix(strings.ToLower(location), "https://") {
+	if isTailscaleConnectionOrderURL(location) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		response, err := mihomoHttp.HttpRequest(ctx, location, http.MethodGet, nil, nil, mihomoHttp.WithSpecialProxy(proxy))
@@ -270,6 +325,33 @@ func readTailscaleConnectionOrder(location string, proxy string) ([]byte, error)
 		return nil, C.Path.ErrNotSafePath(path)
 	}
 	return os.ReadFile(path)
+}
+
+func writeTailscaleConnectionOrderCache(path string, data []byte) error {
+	if len(data) > maxTailscaleConnectionOrderSize {
+		return fmt.Errorf("connection-order file exceeds %d bytes", maxTailscaleConnectionOrderSize)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tempFile, err := os.CreateTemp(dir, ".connection-order-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	if err = tempFile.Chmod(0o644); err == nil {
+		_, err = tempFile.Write(data)
+	}
+	if closeErr := tempFile.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 func parseTailscaleConnectionOrder(data []byte, addDirectIfMissing bool) (map[netip.Addr][]string, error) {
@@ -351,7 +433,48 @@ func (t *Tailscale) ensureStarted(ctx context.Context) error {
 	if err := t.start(); err != nil {
 		return err
 	}
-	return t.waitBackendInitialized(ctx)
+	if err := t.waitBackendInitialized(ctx); err != nil {
+		return err
+	}
+	t.connectionOrderRefreshOnce.Do(func() {
+		if t.connectionOrderURL != "" {
+			go t.refreshTailscaleConnectionOrder()
+		}
+	})
+	return nil
+}
+
+func (t *Tailscale) refreshTailscaleConnectionOrder() {
+	data, err := readTailscaleConnectionOrder(t.connectionOrderURL, t.option.DialerProxy)
+	if err != nil {
+		log.Warnln("[Tailscale](%s) refresh connection order failed; retaining cached order: %v", t.Name(), err)
+		return
+	}
+	orders, err := parseTailscaleConnectionOrder(data, true)
+	if err != nil {
+		log.Warnln("[Tailscale](%s) ignoring invalid remote connection order; retaining cached order: %v", t.Name(), err)
+		return
+	}
+	if err = mergeTailscaleRelayPreferences(orders, t.option); err != nil {
+		log.Warnln("[Tailscale](%s) merge connection order failed; retaining cached order: %v", t.Name(), err)
+		return
+	}
+
+	if t.connectionOrderCache != "" {
+		if err = writeTailscaleConnectionOrderCache(t.connectionOrderCache, data); err != nil {
+			log.Warnln("[Tailscale](%s) save connection order cache %s failed: %v", t.Name(), t.connectionOrderCache, err)
+		} else {
+			log.Infoln("[Tailscale](%s) updated connection order cache %s", t.Name(), t.connectionOrderCache)
+		}
+	}
+
+	select {
+	case <-t.ctx.Done():
+		return
+	default:
+	}
+	t.server.SetConnectionOrder(tailscaleConnectionOrdersFromMap(orders))
+	log.Infoln("[Tailscale](%s) applied remote connection order", t.Name())
 }
 
 func (t *Tailscale) watchBackendState() {

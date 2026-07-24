@@ -22,6 +22,7 @@ type TailscaleOption struct {
 	ExitNode               string   `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
 	ConnectionOrder        string   `proxy:"connection-order,omitempty"`
+	ConnectionOrderCache   string   `proxy:"connection-order-cache,omitempty"`
 	RelayPreferences       []string `proxy:"relay-preferences,omitempty"`
 }
 

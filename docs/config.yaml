@@ -1345,6 +1345,8 @@ proxies: # socks5
     # exit-node: 100.64.0.1 # 使用指定 exit node，可填写节点 IP；也支持 auto:any
     # exit-node-allow-lan-access: true # 使用 exit node 时是否允许访问本地 LAN
     # connection-order: https://example.com/tailscale-connection-order.yaml # 可选；本地文件或 HTTP(S) URL，按设备或 exit node 指定连接顺序
+    # connection-order-cache: ./tailscale/connection-order.yaml # URL 的可选本地缓存路径；默认使用 <state-dir>/connection-order.yaml
+    # URL 配置会先读取缓存（没有缓存时使用自动选路），Tailscale 启动后再后台更新缓存并立即应用，下载失败时保留旧缓存
     # 未在文件中配置的设备使用 Tailscale 自动选路；非空顺序未填写 DIRECT 时，会自动将 DIRECT 放在最前面
     # relay-preferences: [100.91.245.79, TYO] # 兼容旧配置；仅作用于 IP 格式的 exit-node，新配置请使用 connection-order
     # 当目标不在 Tailscale 路由内时，连接会直接报错，不会回退到直连；

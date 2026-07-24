@@ -14,6 +14,12 @@
 #
 # Reference this file from a Tailscale outbound with either a local path or URL:
 # connection-order: https://example.com/tailscale-connection-order.yaml
+#
+# URLs are cache-first to avoid a startup dependency loop: mihomo immediately
+# loads <state-dir>/connection-order.yaml when it exists (or uses automatic
+# selection when it does not), then downloads and applies the URL after the
+# Tailscale outbound starts. A failed download retains the previous cache.
+# Use connection-order-cache to override the default local cache path.
 
 # Direct only.
 100.88.65.23:

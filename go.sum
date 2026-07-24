@@ -1,5 +1,5 @@
-github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260724132156-54c85bb01c6b h1:9pgVxZyp5l44uaB5WaqwrYByQIMLYF2a9EOK3Wv7Eq4=
-github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260724132156-54c85bb01c6b/go.mod h1:rDpd7cy7itpPi3Kgb90fUgSnKwMXHYBk0R5DuNRiNNA=
+github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260724140953-f3c29e9b3089 h1:2R5q9zMZbWdtCAxf4HBsYaVc8tLxDkK8dAcXvs3jXQ4=
+github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260724140953-f3c29e9b3089/go.mod h1:rDpd7cy7itpPi3Kgb90fUgSnKwMXHYBk0R5DuNRiNNA=
 github.com/RyuaNerin/go-krypto v1.3.0 h1:smavTzSMAx8iuVlGb4pEwl9MD2qicqMzuXR2QWp2/Pg=
 github.com/RyuaNerin/go-krypto v1.3.0/go.mod h1:9R9TU936laAIqAmjcHo/LsaXYOZlymudOAxjaBf62UM=
 github.com/RyuaNerin/testingutil v0.1.0 h1:IYT6JL57RV3U2ml3dLHZsVtPOP6yNK7WUVdzzlpNrss=
