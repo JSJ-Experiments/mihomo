@@ -22,6 +22,12 @@
 # retries failures, and refreshes every two hours. A failed download retains the
 # previous cache.
 # Use connection-order-cache to override the default local cache path.
+#
+# The controller API/UI stores device-local overrides separately at
+# <state-dir>/connection-order-local.yaml (or connection-order-local when set).
+# Local entries take precedence over this base file. A local AUTO/empty entry
+# explicitly suppresses a base entry; removing the local entry follows this
+# file again.
 
 # Direct only.
 100.88.65.23:

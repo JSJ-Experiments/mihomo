@@ -1346,9 +1346,19 @@ proxies: # socks5
     # exit-node-allow-lan-access: true # 使用 exit node 时是否允许访问本地 LAN
     # connection-order: https://example.com/tailscale-connection-order.yaml # 可选；本地文件或 HTTP(S) URL，按设备或 exit node 指定连接顺序
     # connection-order-cache: ./tailscale/connection-order.yaml # URL 的可选本地缓存路径；默认使用 <state-dir>/connection-order.yaml
+    # connection-order-local: ./tailscale/connection-order-local.yaml # UI/API 本地覆盖文件；默认使用 <state-dir>/connection-order-local.yaml
     # URL 配置会先读取缓存（没有缓存时使用自动选路），Tailscale 启动后再后台更新缓存并立即应用，下载失败时保留旧缓存
+    # 本地覆盖优先于 URL/文件；本地条目为 AUTO/空列表时强制自动选路，删除本地条目后重新跟随远程配置
     # 未在文件中配置的设备使用 Tailscale 自动选路；非空顺序未填写 DIRECT 时，会自动将 DIRECT 放在最前面
     # relay-preferences: [100.91.245.79, TYO] # 兼容旧配置；仅作用于 IP 格式的 exit-node，新配置请使用 connection-order
+    # service-forwards: # 可选；通过此 tsnet 节点公开 Android/主机的 loopback TCP 服务
+    #   - name: mihomo-controller
+    #     listen: 9090
+    #     target: 127.0.0.1:9090
+    #   - name: ssh
+    #     listen: 8022
+    #     target: 127.0.0.1:8022
+    # target 必须是 loopback IP；配置 service-forwards 会让此 Tailscale 出站在后台保持启动
     # 当目标不在 Tailscale 路由内时，连接会直接报错，不会回退到直连；
     # 访问公网需要配置可用的 exit-node，或接受覆盖目标网段的 subnet routes。
     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出 Tailscale 控制面和 DERP/STUN 等连接

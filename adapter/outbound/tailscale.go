@@ -57,7 +57,14 @@ type Tailscale struct {
 
 	connectionOrderURL         string
 	connectionOrderCache       string
+	connectionOrderLocal       string
+	connectionOrderMu          sync.RWMutex
+	connectionOrderBase        map[netip.Addr][]string
+	connectionOrderOverrides   map[netip.Addr][]string
 	connectionOrderRefreshOnce sync.Once
+
+	serviceListenersMu sync.Mutex
+	serviceListeners   []net.Listener
 
 	unregisterDNSResolver func()
 }
@@ -72,12 +79,22 @@ type TailscaleOption struct {
 	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
 	UDP        bool   `proxy:"udp,omitempty"`
 
-	AcceptRoutes           *bool    `proxy:"accept-routes,omitempty"`
-	ExitNode               string   `proxy:"exit-node,omitempty"`
-	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
-	ConnectionOrder        string   `proxy:"connection-order,omitempty"`
-	ConnectionOrderCache   string   `proxy:"connection-order-cache,omitempty"`
-	RelayPreferences       []string `proxy:"relay-preferences,omitempty"`
+	AcceptRoutes           *bool                     `proxy:"accept-routes,omitempty"`
+	ExitNode               string                    `proxy:"exit-node,omitempty"`
+	ExitNodeAllowLANAccess *bool                     `proxy:"exit-node-allow-lan-access,omitempty"`
+	ConnectionOrder        string                    `proxy:"connection-order,omitempty"`
+	ConnectionOrderCache   string                    `proxy:"connection-order-cache,omitempty"`
+	ConnectionOrderLocal   string                    `proxy:"connection-order-local,omitempty"`
+	RelayPreferences       []string                  `proxy:"relay-preferences,omitempty"`
+	ServiceForwards        []TailscaleServiceForward `proxy:"service-forwards,omitempty"`
+}
+
+// TailscaleServiceForward exposes a TCP port on this tsnet node and forwards
+// accepted connections to a local loopback service.
+type TailscaleServiceForward struct {
+	Name   string `proxy:"name,omitempty"`
+	Listen uint16 `proxy:"listen"`
+	Target string `proxy:"target"`
 }
 
 func init() {
@@ -128,6 +145,9 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	if _, err := buildTailscaleMaskedPrefs(option); err != nil {
 		return nil, err
 	}
+	if err := validateTailscaleServiceForwards(option.ServiceForwards); err != nil {
+		return nil, err
+	}
 	if option.StateDir == "" {
 		option.StateDir = "tailscale"
 	}
@@ -163,15 +183,22 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 
 		connectionOrderURL:   connectionOrder.URL,
 		connectionOrderCache: connectionOrder.CachePath,
+		connectionOrderLocal: connectionOrder.LocalPath,
+		connectionOrderBase:  cloneTailscaleConnectionOrderMap(connectionOrder.Base),
+		connectionOrderOverrides: cloneTailscaleConnectionOrderMap(
+			connectionOrder.Overrides,
+		),
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	outbound.server = &tsnet.Server{
-		Dir:             option.StateDir,
-		Hostname:        option.Hostname,
-		AuthKey:         option.AuthKey,
-		ControlURL:      option.ControlURL,
-		Ephemeral:       option.Ephemeral,
-		ConnectionOrder: connectionOrder.Initial,
+		Dir:        option.StateDir,
+		Hostname:   option.Hostname,
+		AuthKey:    option.AuthKey,
+		ControlURL: option.ControlURL,
+		Ephemeral:  option.Ephemeral,
+		ConnectionOrder: tailscaleConnectionOrdersFromMap(
+			mergeTailscaleConnectionOrderMaps(connectionOrder.Base, connectionOrder.Overrides),
+		),
 		SystemDialer: func(ctx context.Context, network, address string) (net.Conn, error) {
 			log.Debugln("[Tailscale](%s) SystemDialer: start dial %s %s", option.Name, network, address)
 			conn, err := outbound.dialer.DialContext(ctx, network, address)
@@ -201,17 +228,25 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
+	if len(option.ServiceForwards) != 0 {
+		go outbound.runServiceForwards()
+	}
 	return outbound, nil
 }
 
 type tailscaleConnectionOrderConfig struct {
-	Initial   []magicsock.ConnectionOrder
+	Base      map[netip.Addr][]string
+	Overrides map[netip.Addr][]string
 	URL       string
 	CachePath string
+	LocalPath string
 }
 
 func loadTailscaleConnectionOrder(option TailscaleOption) (tailscaleConnectionOrderConfig, error) {
-	var config tailscaleConnectionOrderConfig
+	config := tailscaleConnectionOrderConfig{
+		Base:      make(map[netip.Addr][]string),
+		Overrides: make(map[netip.Addr][]string),
+	}
 	orders := make(map[netip.Addr][]string)
 	if option.ConnectionOrder != "" {
 		if isTailscaleConnectionOrderURL(option.ConnectionOrder) {
@@ -251,7 +286,25 @@ func loadTailscaleConnectionOrder(option TailscaleOption) (tailscaleConnectionOr
 	if err := mergeTailscaleRelayPreferences(orders, option); err != nil {
 		return config, err
 	}
-	config.Initial = tailscaleConnectionOrdersFromMap(orders)
+	config.Base = orders
+
+	config.LocalPath = option.ConnectionOrderLocal
+	if config.LocalPath == "" {
+		config.LocalPath = filepath.Join(option.StateDir, "connection-order-local.yaml")
+	} else {
+		config.LocalPath = C.Path.Resolve(config.LocalPath)
+	}
+	if !C.Path.IsSafePath(config.LocalPath) {
+		return config, C.Path.ErrNotSafePath(config.LocalPath)
+	}
+	if data, err := os.ReadFile(config.LocalPath); err == nil {
+		config.Overrides, err = parseTailscaleConnectionOrderOverrides(data)
+		if err != nil {
+			return config, fmt.Errorf("parse local tailscale connection-order overrides: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return config, fmt.Errorf("read local tailscale connection-order overrides: %w", err)
+	}
 	return config, nil
 }
 
@@ -289,6 +342,57 @@ func tailscaleConnectionOrdersFromMap(orders map[netip.Addr][]string) []magicsoc
 		})
 	}
 	return result
+}
+
+func cloneTailscaleConnectionOrderMap(source map[netip.Addr][]string) map[netip.Addr][]string {
+	result := make(map[netip.Addr][]string, len(source))
+	for target, paths := range source {
+		result[target] = append([]string(nil), paths...)
+	}
+	return result
+}
+
+func mergeTailscaleConnectionOrderMaps(base, overrides map[netip.Addr][]string) map[netip.Addr][]string {
+	result := cloneTailscaleConnectionOrderMap(base)
+	for target, paths := range overrides {
+		if len(paths) == 0 {
+			delete(result, target)
+		} else {
+			result[target] = append([]string(nil), paths...)
+		}
+	}
+	return result
+}
+
+func parseTailscaleConnectionOrderOverrides(data []byte) (map[netip.Addr][]string, error) {
+	var raw map[string][]string
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	overrides := make(map[netip.Addr][]string, len(raw))
+	for targetString, rawPaths := range raw {
+		target, err := netip.ParseAddr(strings.TrimSpace(targetString))
+		if err != nil {
+			return nil, fmt.Errorf("invalid target %q: %w", targetString, err)
+		}
+		// Keep an empty result: in the local override file it explicitly
+		// selects normal Tailscale AUTO behavior even if the remote file has
+		// an order for this peer.
+		overrides[target] = normalizeTailscaleConnectionOrder(rawPaths, true)
+	}
+	return overrides, nil
+}
+
+func marshalTailscaleConnectionOrderOverrides(overrides map[netip.Addr][]string) ([]byte, error) {
+	raw := make(map[string][]string, len(overrides))
+	for target, paths := range overrides {
+		if len(paths) == 0 {
+			raw[target.String()] = []string{"AUTO"}
+		} else {
+			raw[target.String()] = append([]string(nil), paths...)
+		}
+	}
+	return yaml.Marshal(raw)
 }
 
 const (
@@ -361,6 +465,107 @@ func writeTailscaleConnectionOrderCache(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tempPath, path)
+}
+
+// TailscaleConnectionOrderState describes the remote/base order, the optional
+// device-local override, and the resulting order. A nil Local means there is
+// no local override; a non-nil empty Local explicitly means AUTO.
+type TailscaleConnectionOrderState struct {
+	Target    string    `json:"target"`
+	Base      []string  `json:"base"`
+	Local     *[]string `json:"local"`
+	Effective []string  `json:"effective"`
+}
+
+func (t *Tailscale) ConnectionOrderStates() []TailscaleConnectionOrderState {
+	t.connectionOrderMu.RLock()
+	defer t.connectionOrderMu.RUnlock()
+
+	targetSet := make(map[netip.Addr]struct{}, len(t.connectionOrderBase)+len(t.connectionOrderOverrides))
+	for target := range t.connectionOrderBase {
+		targetSet[target] = struct{}{}
+	}
+	for target := range t.connectionOrderOverrides {
+		targetSet[target] = struct{}{}
+	}
+	targets := make([]netip.Addr, 0, len(targetSet))
+	for target := range targetSet {
+		targets = append(targets, target)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].Compare(targets[j]) < 0
+	})
+
+	effective := mergeTailscaleConnectionOrderMaps(t.connectionOrderBase, t.connectionOrderOverrides)
+	result := make([]TailscaleConnectionOrderState, 0, len(targets))
+	for _, target := range targets {
+		state := TailscaleConnectionOrderState{
+			Target:    target.String(),
+			Base:      append([]string(nil), t.connectionOrderBase[target]...),
+			Effective: append([]string(nil), effective[target]...),
+		}
+		if local, ok := t.connectionOrderOverrides[target]; ok {
+			localCopy := append([]string(nil), local...)
+			if localCopy == nil {
+				localCopy = []string{}
+			}
+			state.Local = &localCopy
+		}
+		result = append(result, state)
+	}
+	return result
+}
+
+// SetConnectionOrderOverride persists a device-local order. An empty order is
+// an explicit AUTO override. If DIRECT is omitted it is inserted first.
+func (t *Tailscale) SetConnectionOrderOverride(target netip.Addr, paths []string) error {
+	if !target.IsValid() {
+		return errors.New("invalid Tailscale target IP")
+	}
+	normalized := normalizeTailscaleConnectionOrder(paths, true)
+
+	t.connectionOrderMu.Lock()
+	defer t.connectionOrderMu.Unlock()
+	overrides := cloneTailscaleConnectionOrderMap(t.connectionOrderOverrides)
+	overrides[target] = normalized
+	if err := t.persistConnectionOrderOverridesLocked(overrides); err != nil {
+		return err
+	}
+	t.connectionOrderOverrides = overrides
+	t.applyConnectionOrdersLocked()
+	return nil
+}
+
+// ClearConnectionOrderOverride removes the device-local override so the remote
+// order (or AUTO when absent remotely) applies again.
+func (t *Tailscale) ClearConnectionOrderOverride(target netip.Addr) error {
+	if !target.IsValid() {
+		return errors.New("invalid Tailscale target IP")
+	}
+
+	t.connectionOrderMu.Lock()
+	defer t.connectionOrderMu.Unlock()
+	overrides := cloneTailscaleConnectionOrderMap(t.connectionOrderOverrides)
+	delete(overrides, target)
+	if err := t.persistConnectionOrderOverridesLocked(overrides); err != nil {
+		return err
+	}
+	t.connectionOrderOverrides = overrides
+	t.applyConnectionOrdersLocked()
+	return nil
+}
+
+func (t *Tailscale) persistConnectionOrderOverridesLocked(overrides map[netip.Addr][]string) error {
+	data, err := marshalTailscaleConnectionOrderOverrides(overrides)
+	if err != nil {
+		return err
+	}
+	return writeTailscaleConnectionOrderCache(t.connectionOrderLocal, data)
+}
+
+func (t *Tailscale) applyConnectionOrdersLocked() {
+	effective := mergeTailscaleConnectionOrderMaps(t.connectionOrderBase, t.connectionOrderOverrides)
+	t.server.SetConnectionOrder(tailscaleConnectionOrdersFromMap(effective))
 }
 
 func parseTailscaleConnectionOrder(data []byte, addDirectIfMissing bool) (map[netip.Addr][]string, error) {
@@ -514,9 +719,176 @@ func (t *Tailscale) refreshTailscaleConnectionOrder() bool {
 		return false
 	default:
 	}
-	t.server.SetConnectionOrder(tailscaleConnectionOrdersFromMap(orders))
+	t.connectionOrderMu.Lock()
+	t.connectionOrderBase = cloneTailscaleConnectionOrderMap(orders)
+	t.applyConnectionOrdersLocked()
+	t.connectionOrderMu.Unlock()
 	log.Infoln("[Tailscale](%s) applied remote connection order", t.Name())
 	return true
+}
+
+// TailscaleDevice is a peer visible to this outbound's tsnet node.
+type TailscaleDevice struct {
+	ID             string    `json:"id"`
+	HostName       string    `json:"hostName"`
+	DNSName        string    `json:"dnsName"`
+	OS             string    `json:"os"`
+	IP             string    `json:"ip"`
+	IPs            []string  `json:"ips"`
+	Online         bool      `json:"online"`
+	Active         bool      `json:"active"`
+	ExitNode       bool      `json:"exitNode"`
+	ExitNodeOption bool      `json:"exitNodeOption"`
+	CurrentPath    string    `json:"currentPath"`
+	DERP           string    `json:"derp"`
+	PeerRelay      string    `json:"peerRelay"`
+	RxBytes        int64     `json:"rxBytes"`
+	TxBytes        int64     `json:"txBytes"`
+	LastHandshake  time.Time `json:"lastHandshake,omitempty"`
+}
+
+// TailscaleDevices returns peers currently visible in the network map.
+func (t *Tailscale) TailscaleDevices(ctx context.Context) ([]TailscaleDevice, error) {
+	if err := t.ensureStarted(ctx); err != nil {
+		return nil, err
+	}
+	lc, err := t.server.LocalClient()
+	if err != nil {
+		return nil, err
+	}
+	status, err := lc.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]TailscaleDevice, 0, len(status.Peer))
+	for _, peer := range status.Peer {
+		device := TailscaleDevice{
+			ID:             string(peer.ID),
+			HostName:       peer.HostName,
+			DNSName:        strings.TrimSuffix(peer.DNSName, "."),
+			OS:             peer.OS,
+			Online:         peer.Online,
+			Active:         peer.Active,
+			ExitNode:       peer.ExitNode,
+			ExitNodeOption: peer.ExitNodeOption,
+			CurrentPath:    peer.CurAddr,
+			DERP:           peer.Relay,
+			PeerRelay:      peer.PeerRelay,
+			RxBytes:        peer.RxBytes,
+			TxBytes:        peer.TxBytes,
+			LastHandshake:  peer.LastHandshake,
+		}
+		for _, ip := range peer.TailscaleIPs {
+			device.IPs = append(device.IPs, ip.String())
+			if device.IP == "" || (ip.Is4() && !strings.Contains(device.IP, ".")) {
+				device.IP = ip.String()
+			}
+		}
+		result = append(result, device)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.ToLower(result[i].HostName)
+		right := strings.ToLower(result[j].HostName)
+		if left != right {
+			return left < right
+		}
+		return result[i].IP < result[j].IP
+	})
+	return result, nil
+}
+
+func (t *Tailscale) ConnectionPathOptions(ctx context.Context) (magicsock.ConnectionPathOptions, error) {
+	if err := t.ensureStarted(ctx); err != nil {
+		return magicsock.ConnectionPathOptions{}, err
+	}
+	return t.server.ConnectionPathOptions()
+}
+
+func (t *Tailscale) ProbeConnectionPaths(ctx context.Context, target netip.Addr, paths []string) ([]magicsock.ConnectionPathProbe, error) {
+	if err := t.ensureStarted(ctx); err != nil {
+		return nil, err
+	}
+	return t.server.ProbeConnectionPaths(ctx, target, paths)
+}
+
+func validateTailscaleServiceForwards(forwards []TailscaleServiceForward) error {
+	ports := make(map[uint16]struct{}, len(forwards))
+	for _, forward := range forwards {
+		if forward.Listen == 0 {
+			return fmt.Errorf("tailscale service forward %q has an invalid listen port", forward.Name)
+		}
+		if _, duplicate := ports[forward.Listen]; duplicate {
+			return fmt.Errorf("duplicate tailscale service forward listen port %d", forward.Listen)
+		}
+		ports[forward.Listen] = struct{}{}
+		target, err := netip.ParseAddrPort(forward.Target)
+		if err != nil {
+			return fmt.Errorf("tailscale service forward %q has an invalid target %q", forward.Name, forward.Target)
+		}
+		if !target.Addr().IsLoopback() {
+			return fmt.Errorf("tailscale service forward %q target must be a loopback IP address", forward.Name)
+		}
+	}
+	return nil
+}
+
+func (t *Tailscale) runServiceForwards() {
+	if err := t.ensureStarted(t.ctx); err != nil {
+		if t.ctx.Err() == nil {
+			log.Errorln("[Tailscale](%s) cannot start service forwards: %v", t.Name(), err)
+		}
+		return
+	}
+	for _, forward := range t.option.ServiceForwards {
+		listener, err := t.server.Listen("tcp", fmt.Sprintf(":%d", forward.Listen))
+		if err != nil {
+			log.Errorln("[Tailscale](%s) cannot listen for service forward %q: %v", t.Name(), forward.Name, err)
+			continue
+		}
+		if t.ctx.Err() != nil {
+			_ = listener.Close()
+			return
+		}
+		t.serviceListenersMu.Lock()
+		t.serviceListeners = append(t.serviceListeners, listener)
+		t.serviceListenersMu.Unlock()
+		log.Infoln("[Tailscale](%s) service forward %q listening on tailnet port %d -> %s", t.Name(), forward.Name, forward.Listen, forward.Target)
+		go t.acceptServiceForward(listener, forward)
+	}
+}
+
+func (t *Tailscale) acceptServiceForward(listener net.Listener, forward TailscaleServiceForward) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if t.ctx.Err() == nil {
+				log.Warnln("[Tailscale](%s) service forward %q accept failed: %v", t.Name(), forward.Name, err)
+			}
+			return
+		}
+		go t.handleServiceForward(conn, forward)
+	}
+}
+
+func (t *Tailscale) handleServiceForward(source net.Conn, forward TailscaleServiceForward) {
+	defer source.Close()
+	target, err := (&net.Dialer{}).DialContext(t.ctx, "tcp", forward.Target)
+	if err != nil {
+		log.Warnln("[Tailscale](%s) service forward %q dial %s failed: %v", t.Name(), forward.Name, forward.Target, err)
+		return
+	}
+	defer target.Close()
+
+	copyDone := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(target, source)
+		copyDone <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(source, target)
+		copyDone <- struct{}{}
+	}()
+	<-copyDone
 }
 
 func (t *Tailscale) watchBackendState() {
@@ -775,6 +1147,12 @@ func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
 
 func (t *Tailscale) Close() error {
 	t.cancel()
+	t.serviceListenersMu.Lock()
+	for _, listener := range t.serviceListeners {
+		_ = listener.Close()
+	}
+	t.serviceListeners = nil
+	t.serviceListenersMu.Unlock()
 	if t.unregisterDNSResolver != nil {
 		t.unregisterDNSResolver()
 	}

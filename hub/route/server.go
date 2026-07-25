@@ -135,6 +135,7 @@ func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 		r.Mount("/cache", cacheRouter())
 		r.Mount("/dns", dnsRouter())
 		r.Mount("/storage", storageRouter())
+		r.Mount("/tailscale", tailscaleRouter())
 		if !embedMode { // disallow restart in embed mode
 			r.Mount("/restart", restartRouter())
 		}
@@ -152,6 +153,16 @@ func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 			})
 		})
 	}
+	r.Group(func(r chi.Router) {
+		// The path UI is packaged independently so it can be updated without
+		// replacing Mihomo. Box installs its dist files in this directory.
+		pathUI := C.Path.Resolve("tailscale-ui")
+		fs := http.StripPrefix("/tailscale-ui", http.FileServer(http.Dir(pathUI)))
+		r.Get("/tailscale-ui", http.RedirectHandler("/tailscale-ui/", http.StatusTemporaryRedirect).ServeHTTP)
+		r.Get("/tailscale-ui/*", func(w http.ResponseWriter, r *http.Request) {
+			fs.ServeHTTP(w, r)
+		})
+	})
 	if len(dohServer) > 0 && dohServer[0] == '/' {
 		r.Mount(dohServer, dohRouter())
 	}
