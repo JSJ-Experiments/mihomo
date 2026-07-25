@@ -25,6 +25,28 @@ type tailscaleOutboundInfo struct {
 	Name     string `json:"name"`
 }
 
+type proxyAdapterUnwrapper interface {
+	UnderlyingProxyAdapter() C.ProxyAdapter
+}
+
+func asTailscale(adapter C.ProxyAdapter) (*outbound.Tailscale, bool) {
+	for adapter != nil {
+		if tailscale, ok := adapter.(*outbound.Tailscale); ok {
+			return tailscale, true
+		}
+		unwrapper, ok := adapter.(proxyAdapterUnwrapper)
+		if !ok {
+			break
+		}
+		next := unwrapper.UnderlyingProxyAdapter()
+		if next == adapter {
+			break
+		}
+		adapter = next
+	}
+	return nil, false
+}
+
 func tailscaleRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getTailscaleOutbounds)
@@ -47,13 +69,13 @@ func tailscaleOutbounds() []tailscaleOutboundInfo {
 	var result []tailscaleOutboundInfo
 	for providerName, provider := range tunnel.Providers() {
 		for _, proxy := range provider.Proxies() {
-			if _, ok := proxy.Adapter().(*outbound.Tailscale); ok {
+			if _, ok := asTailscale(proxy.Adapter()); ok {
 				result = append(result, tailscaleOutboundInfo{Provider: providerName, Name: proxy.Name()})
 			}
 		}
 	}
 	for name, proxy := range tunnel.Proxies() {
-		if _, ok := proxy.Adapter().(*outbound.Tailscale); ok {
+		if _, ok := asTailscale(proxy.Adapter()); ok {
 			result = append(result, tailscaleOutboundInfo{Provider: "@global", Name: name})
 		}
 	}
@@ -93,7 +115,7 @@ func findTailscaleOutbound(next http.Handler) http.Handler {
 			render.JSON(w, r, ErrNotFound)
 			return
 		}
-		tailscale, ok := proxy.Adapter().(*outbound.Tailscale)
+		tailscale, ok := asTailscale(proxy.Adapter())
 		if !ok {
 			render.Status(r, http.StatusBadRequest)
 			render.JSON(w, r, newError("proxy is not a Tailscale outbound"))

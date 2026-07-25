@@ -359,6 +359,13 @@ type autoCloseProxyAdapter struct {
 	closeErr  error
 }
 
+// UnderlyingProxyAdapter exposes the underlying adapter to management APIs that need
+// implementation-specific capabilities while retaining automatic lifecycle
+// handling for provider proxies.
+func (p *autoCloseProxyAdapter) UnderlyingProxyAdapter() C.ProxyAdapter {
+	return p.ProxyAdapter
+}
+
 func (p *autoCloseProxyAdapter) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	c, err := p.ProxyAdapter.DialContext(ctx, metadata)
 	if err != nil {
