@@ -4,6 +4,7 @@ package outbound
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -154,6 +155,7 @@ func TestRefreshTailscaleConnectionOrderUpdatesCacheAndServer(t *testing.T) {
 	defer cancel()
 	cachePath := filepath.Join(t.TempDir(), "connection-order.yaml")
 	server := new(tsnet.Server)
+	recordingDialer := new(tailscaleConnectionOrderTestDialer)
 	outbound := &Tailscale{
 		Base:                 NewBase(BaseOption{Name: "test"}),
 		server:               server,
@@ -162,7 +164,13 @@ func TestRefreshTailscaleConnectionOrderUpdatesCacheAndServer(t *testing.T) {
 		connectionOrderURL:   remote.URL,
 		connectionOrderCache: cachePath,
 	}
-	outbound.refreshTailscaleConnectionOrder()
+	outbound.dialer = recordingDialer
+	if !outbound.refreshTailscaleConnectionOrder() {
+		t.Fatal("remote connection order refresh failed")
+	}
+	if recordingDialer.calls == 0 {
+		t.Fatal("connection order refresh did not use the Tailscale bootstrap dialer")
+	}
 
 	cached, err := os.ReadFile(cachePath)
 	if err != nil {
@@ -177,4 +185,17 @@ func TestRefreshTailscaleConnectionOrderUpdatesCacheAndServer(t *testing.T) {
 		!reflect.DeepEqual(server.ConnectionOrder[0].Paths, want) {
 		t.Fatalf("live connection order = %#v", server.ConnectionOrder)
 	}
+}
+
+type tailscaleConnectionOrderTestDialer struct {
+	calls int
+}
+
+func (d *tailscaleConnectionOrderTestDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.calls++
+	return new(net.Dialer).DialContext(ctx, network, address)
+}
+
+func (d *tailscaleConnectionOrderTestDialer) ListenPacket(ctx context.Context, network, address string, _ netip.AddrPort) (net.PacketConn, error) {
+	return new(net.ListenConfig).ListenPacket(ctx, network, address)
 }

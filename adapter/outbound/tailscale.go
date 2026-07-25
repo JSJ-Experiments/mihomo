@@ -291,7 +291,12 @@ func tailscaleConnectionOrdersFromMap(orders map[netip.Addr][]string) []magicsoc
 	return result
 }
 
-const maxTailscaleConnectionOrderSize = 1 << 20
+const (
+	maxTailscaleConnectionOrderSize      = 1 << 20
+	tailscaleConnectionOrderRefreshDelay = 2 * time.Hour
+	tailscaleConnectionOrderRetryDelay   = 30 * time.Second
+	tailscaleConnectionOrderMaxRetry     = 10 * time.Minute
+)
 
 func isTailscaleConnectionOrderURL(location string) bool {
 	return strings.HasPrefix(strings.ToLower(location), "http://") ||
@@ -300,24 +305,7 @@ func isTailscaleConnectionOrderURL(location string) bool {
 
 func readTailscaleConnectionOrder(location string, proxy string) ([]byte, error) {
 	if isTailscaleConnectionOrderURL(location) {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		response, err := mihomoHttp.HttpRequest(ctx, location, http.MethodGet, nil, nil, mihomoHttp.WithSpecialProxy(proxy))
-		if err != nil {
-			return nil, err
-		}
-		defer response.Body.Close()
-		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			return nil, fmt.Errorf("unexpected HTTP status: %s", response.Status)
-		}
-		data, err := io.ReadAll(io.LimitReader(response.Body, maxTailscaleConnectionOrderSize+1))
-		if err != nil {
-			return nil, err
-		}
-		if len(data) > maxTailscaleConnectionOrderSize {
-			return nil, fmt.Errorf("connection-order file exceeds %d bytes", maxTailscaleConnectionOrderSize)
-		}
-		return data, nil
+		return downloadTailscaleConnectionOrder(context.Background(), location, mihomoHttp.WithSpecialProxy(proxy))
 	}
 
 	path := C.Path.Resolve(location)
@@ -325,6 +313,27 @@ func readTailscaleConnectionOrder(location string, proxy string) ([]byte, error)
 		return nil, C.Path.ErrNotSafePath(path)
 	}
 	return os.ReadFile(path)
+}
+
+func downloadTailscaleConnectionOrder(ctx context.Context, location string, options ...mihomoHttp.Option) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := mihomoHttp.HttpRequest(ctx, location, http.MethodGet, nil, nil, options...)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("unexpected HTTP status: %s", response.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxTailscaleConnectionOrderSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxTailscaleConnectionOrderSize {
+		return nil, fmt.Errorf("connection-order file exceeds %d bytes", maxTailscaleConnectionOrderSize)
+	}
+	return data, nil
 }
 
 func writeTailscaleConnectionOrderCache(path string, data []byte) error {
@@ -438,26 +447,58 @@ func (t *Tailscale) ensureStarted(ctx context.Context) error {
 	}
 	t.connectionOrderRefreshOnce.Do(func() {
 		if t.connectionOrderURL != "" {
-			go t.refreshTailscaleConnectionOrder()
+			go t.runTailscaleConnectionOrderRefresh()
 		}
 	})
 	return nil
 }
 
-func (t *Tailscale) refreshTailscaleConnectionOrder() {
-	data, err := readTailscaleConnectionOrder(t.connectionOrderURL, t.option.DialerProxy)
+func (t *Tailscale) runTailscaleConnectionOrderRefresh() {
+	delay := time.Duration(0)
+	retryDelay := tailscaleConnectionOrderRetryDelay
+	for {
+		if delay != 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-t.ctx.Done():
+				timer.Stop()
+				return
+			}
+		}
+
+		if t.refreshTailscaleConnectionOrder() {
+			delay = tailscaleConnectionOrderRefreshDelay
+			retryDelay = tailscaleConnectionOrderRetryDelay
+		} else {
+			delay = retryDelay
+			retryDelay *= 2
+			if retryDelay > tailscaleConnectionOrderMaxRetry {
+				retryDelay = tailscaleConnectionOrderMaxRetry
+			}
+		}
+	}
+}
+
+func (t *Tailscale) refreshTailscaleConnectionOrder() bool {
+	// Use the same underlying dialer as the Tailscale control connection.
+	// Routing this bootstrap request back through Mihomo can recursively select
+	// the Tailscale outbound whose path order is still being initialized.
+	data, err := downloadTailscaleConnectionOrder(t.ctx, t.connectionOrderURL, mihomoHttp.WithDialer(t.dialer))
 	if err != nil {
-		log.Warnln("[Tailscale](%s) refresh connection order failed; retaining cached order: %v", t.Name(), err)
-		return
+		if t.ctx.Err() == nil {
+			log.Warnln("[Tailscale](%s) refresh connection order failed; retaining cached order and retrying: %v", t.Name(), err)
+		}
+		return false
 	}
 	orders, err := parseTailscaleConnectionOrder(data, true)
 	if err != nil {
-		log.Warnln("[Tailscale](%s) ignoring invalid remote connection order; retaining cached order: %v", t.Name(), err)
-		return
+		log.Warnln("[Tailscale](%s) ignoring invalid remote connection order; retaining cached order and retrying: %v", t.Name(), err)
+		return false
 	}
 	if err = mergeTailscaleRelayPreferences(orders, t.option); err != nil {
-		log.Warnln("[Tailscale](%s) merge connection order failed; retaining cached order: %v", t.Name(), err)
-		return
+		log.Warnln("[Tailscale](%s) merge connection order failed; retaining cached order and retrying: %v", t.Name(), err)
+		return false
 	}
 
 	if t.connectionOrderCache != "" {
@@ -470,11 +511,12 @@ func (t *Tailscale) refreshTailscaleConnectionOrder() {
 
 	select {
 	case <-t.ctx.Done():
-		return
+		return false
 	default:
 	}
 	t.server.SetConnectionOrder(tailscaleConnectionOrdersFromMap(orders))
 	log.Infoln("[Tailscale](%s) applied remote connection order", t.Name())
+	return true
 }
 
 func (t *Tailscale) watchBackendState() {
