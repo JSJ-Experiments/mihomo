@@ -8,6 +8,8 @@ github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260725050104-fcbbd70f759
 github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260725050104-fcbbd70f7596/go.mod h1:rDpd7cy7itpPi3Kgb90fUgSnKwMXHYBk0R5DuNRiNNA=
 github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260725052410-2168d4f3c319 h1:3fGmAsUqEljxb80ft0jRjtE7HaajEngQUEpfCjnWFsU=
 github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260725052410-2168d4f3c319/go.mod h1:rDpd7cy7itpPi3Kgb90fUgSnKwMXHYBk0R5DuNRiNNA=
+github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260725061358-d0070b323ab0 h1:TAD7U8oZM4IyGa3rU48IIYVggzk8BvLDf2J8HV36OCk=
+github.com/JSJ-Experiments/metacubex-tailscale v0.0.0-20260725061358-d0070b323ab0/go.mod h1:rDpd7cy7itpPi3Kgb90fUgSnKwMXHYBk0R5DuNRiNNA=
 github.com/RyuaNerin/go-krypto v1.3.0 h1:smavTzSMAx8iuVlGb4pEwl9MD2qicqMzuXR2QWp2/Pg=
 github.com/RyuaNerin/go-krypto v1.3.0/go.mod h1:9R9TU936laAIqAmjcHo/LsaXYOZlymudOAxjaBf62UM=
 github.com/RyuaNerin/testingutil v0.1.0 h1:IYT6JL57RV3U2ml3dLHZsVtPOP6yNK7WUVdzzlpNrss=
