@@ -63,8 +63,9 @@ type Tailscale struct {
 	connectionOrderOverrides   map[netip.Addr][]string
 	connectionOrderRefreshOnce sync.Once
 
-	serviceListenersMu sync.Mutex
-	serviceListeners   []net.Listener
+	serviceForwardsOnce sync.Once
+	serviceListenersMu  sync.Mutex
+	serviceListeners    []net.Listener
 
 	unregisterDNSResolver func()
 }
@@ -87,6 +88,7 @@ type TailscaleOption struct {
 	ConnectionOrderLocal   string                    `proxy:"connection-order-local,omitempty"`
 	RelayPreferences       []string                  `proxy:"relay-preferences,omitempty"`
 	ServiceForwards        []TailscaleServiceForward `proxy:"service-forwards,omitempty"`
+	ServiceForwardsLazy    bool                      `proxy:"service-forwards-lazy,omitempty"`
 }
 
 // TailscaleServiceForward exposes a TCP port on this tsnet node and forwards
@@ -228,7 +230,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
-	if len(option.ServiceForwards) != 0 {
+	if len(option.ServiceForwards) != 0 && !option.ServiceForwardsLazy {
 		go outbound.runServiceForwards()
 	}
 	return outbound, nil
@@ -655,6 +657,9 @@ func (t *Tailscale) ensureStarted(ctx context.Context) error {
 			go t.runTailscaleConnectionOrderRefresh()
 		}
 	})
+	if t.option.ServiceForwardsLazy && len(t.option.ServiceForwards) != 0 {
+		t.serviceForwardsOnce.Do(t.startServiceForwards)
+	}
 	return nil
 }
 
@@ -839,6 +844,10 @@ func (t *Tailscale) runServiceForwards() {
 		}
 		return
 	}
+	t.serviceForwardsOnce.Do(t.startServiceForwards)
+}
+
+func (t *Tailscale) startServiceForwards() {
 	for _, forward := range t.option.ServiceForwards {
 		listener, err := t.server.Listen("tcp", fmt.Sprintf(":%d", forward.Listen))
 		if err != nil {

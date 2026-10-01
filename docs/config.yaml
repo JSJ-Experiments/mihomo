@@ -1358,7 +1358,8 @@ proxies: # socks5
     #   - name: ssh
     #     listen: 8022
     #     target: 127.0.0.1:8022
-    # target 必须是 loopback IP；配置 service-forwards 会让此 Tailscale 出站在后台保持启动
+    # service-forwards-lazy: true # 可选；仅在该 Tailscale 出站首次实际使用/API 唤醒后挂载转发，不因配置转发本身启动 tsnet
+    # target 必须是 loopback IP；默认情况下配置 service-forwards 会让此 Tailscale 出站在后台保持启动
     # 当目标不在 Tailscale 路由内时，连接会直接报错，不会回退到直连；
     # 访问公网需要配置可用的 exit-node，或接受覆盖目标网段的 subnet routes。
     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出 Tailscale 控制面和 DERP/STUN 等连接

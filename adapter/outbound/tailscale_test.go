@@ -260,6 +260,34 @@ func TestValidateTailscaleServiceForwards(t *testing.T) {
 	}
 }
 
+func TestLazyTailscaleServiceForwardsDoNotStartOnConstruction(t *testing.T) {
+	oldHomeDir := C.Path.HomeDir()
+	homeDir := t.TempDir()
+	C.SetHomeDir(homeDir)
+	t.Cleanup(func() {
+		C.SetHomeDir(oldHomeDir)
+	})
+
+	outbound, err := NewTailscale(TailscaleOption{
+		Name:                "lazy-management-test",
+		Hostname:            "lazy-management-test",
+		StateDir:            filepath.Join(homeDir, "tailscale-lazy-management-test"),
+		ServiceForwards:     []TailscaleServiceForward{{Name: "ssh", Listen: 8022, Target: "127.0.0.1:8022"}},
+		ServiceForwardsLazy: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = outbound.Close() })
+
+	if outbound.serverStarted {
+		t.Fatal("lazy service forward started tsnet during outbound construction")
+	}
+	if len(outbound.serviceListeners) != 0 {
+		t.Fatalf("lazy service forward installed %d listener(s) before first use", len(outbound.serviceListeners))
+	}
+}
+
 func TestRefreshTailscaleConnectionOrderUpdatesCacheAndServer(t *testing.T) {
 	data := []byte("100.113.237.90: [TYO, 100.91.245.79]\n")
 	remote := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {

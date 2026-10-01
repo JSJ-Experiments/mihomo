@@ -26,6 +26,7 @@ type TailscaleOption struct {
 	ConnectionOrderLocal   string                    `proxy:"connection-order-local,omitempty"`
 	RelayPreferences       []string                  `proxy:"relay-preferences,omitempty"`
 	ServiceForwards        []TailscaleServiceForward `proxy:"service-forwards,omitempty"`
+	ServiceForwardsLazy    bool                      `proxy:"service-forwards-lazy,omitempty"`
 }
 
 type TailscaleServiceForward struct {
